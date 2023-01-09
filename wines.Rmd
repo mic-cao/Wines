@@ -1,6 +1,6 @@
 ---
-title: "4740 FINAL"
-author: "Michael Cao"
+title: "Wines"
+author: "Michael Cao, Aristotle Kolefas, Chang Chen"
 date: "2022-12-04"
 output:
   word_document: default
