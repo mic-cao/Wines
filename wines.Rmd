@@ -1,0 +1,617 @@
+---
+title: "4740 FINAL"
+author: "Michael Cao"
+date: "2022-12-04"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library(readr)
+library(lmtest)
+library(leaps) 
+library(glmnet) # install.packages('glmnet', dependencies=TRUE, type="binary")
+library(pls)
+library(gam)
+library(boot)
+
+####################################
+# Part 1: Data Cleaning
+
+# Read CSV file
+winequality_red <- read_delim("winequality-red.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+winequality_red <- na.omit(winequality_red)
+winequality_red <- data.frame(quality = winequality_red$quality, winequality_red[, c(1:11)])
+
+winequality_white <- read_delim("winequality-white.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+winequality_white <- na.omit(winequality_white)
+winequality_white <- data.frame(quality = winequality_white$quality, winequality_white[, c(1:11)])
+
+# Run likelihood ratio test on each predictor and remove the ones that aren't significant
+dframes.names <- c("winequality_red", "winequality_white")
+for (i in dframes.names)
+{
+  current <- get(i); print(i)
+  lm_null <- lm(quality ~ 1, data = current)
+  for (j in colnames(current)[-1])
+  {
+    lm_partial <- lm(as.formula(paste0("quality ~", "`", j,"`")), data = current)
+    print(lrtest(lm_null, lm_partial))
+  }
+}
+
+winequality_red_new <- winequality_red[, !names(winequality_red) %in% c("residual.sugar")]
+winequality_white_new <- winequality_white[, !names(winequality_white) %in% c("citric.acid", "free.sulfur.dioxide")]
+# We find that residual sugar is not significant for red wines and that neither citric acid nor free sulfur dioxide is significant for white wines. 
+
+# Obtain correlation matrices and find highly correlated predictors:
+cor_red_new <- cor(winequality_red_new)
+corr_preds_red_new <- cor_red_new[abs(cor_red_new) > 0.8] # no highly correlated predictors here
+
+cor_white_new <- cor(winequality_white_new)
+corr_preds_white <- cor_white_new[abs(cor_white_new) > 0.8] # one highly correlated predictor here
+winequality_white_new <- winequality_white_new[, !names(winequality_white_new) %in% c("residual.sugar")]
+
+
+############################
+# Part 2: ML Methods
+############################
+
+#################################
+# 1) Multiple linear regression
+library(boot)
+
+bestModelFinder <- function(dat)
+{
+  models <- c()
+  AIC <- c(); BIC <- c(); cv.err<-c()
+  for (i in 1:ncol(dat)-1)
+  {
+    comb <- combn(2:ncol(dat), i)
+    for (j in 1:ncol(comb))
+    {
+      dat.temp <- data.frame(dat[, c(1,comb[,j])])
+      lm.temp <- lm(as.formula(paste0(colnames(dat.temp)[1],"~.")), 
+                    data = dat.temp, x=T, y = TRUE)
+      models <- append(models, Reduce(paste, deparse(formula(lm.temp))))
+      BIC <- append(BIC, BIC(lm.temp))
+      AIC <- append(AIC, AIC(lm.temp))
+      err=cv.glm(dat.temp, lm.temp, K=10)$delta[1]
+      cv.err <- append(cv.err, err)
+    }
+  }
+  summary <- data.frame(models, AIC, BIC, cv.err)
+
+  cat("Top 5 Models:", "\n")
+  print(head(summary[order(summary$cv.err),],5))  
+  cat("\n", "Model", summary$models[which.min(summary$cv.err)],
+      "returns the lowest CV error of", min(summary$cv.err), "\n")
+  
+}
+bestModelFinder(winequality_red_new)
+bestModelFinder(winequality_white_new)
+
+lm.red.best<-lm(quality ~ volatile.acidity + chlorides + free.sulfur.dioxide +
+                  total.sulfur.dioxide + pH + sulphates + alcohol, data = winequality_red)
+lm.white.best<-lm(quality ~ fixed.acidity + volatile.acidity + total.sulfur.dioxide + density + sulphates + alcohol, data = winequality_white)
+
+
+###########################################################
+# 2) Ridge Regression
+
+# Red wine
+x_r=model.matrix(quality~.,winequality_red_new)[,-1]
+y_r=winequality_red_new$quality
+
+set.seed(10)
+cv.out_rr=cv.glmnet(x_r,y_r,alpha=0) # 10 fold cross validation by default
+bestlam_rr=cv.out_rr$lambda.min
+ridge.red.best=glmnet(x_r,y_r,alpha=0,lambda=bestlam_rr)
+coef(ridge.red.best)[,1]
+pred.ridge_r = predict(ridge.red.best, s = bestlam_rr, newx = x_r)
+mean((pred.ridge_r - winequality_red_new$quality)^2) # training_MSE
+
+# White wine
+x_w=model.matrix(quality~.,winequality_white_new)[,-1]
+y_w=winequality_white_new$quality
+
+set.seed(10)
+cv.out_rw=cv.glmnet(x_w,y_w,alpha=0) # 10 fold cross validation by default
+bestlam_rw=cv.out_rw$lambda.min
+ridge.white.best=glmnet(x_w,y_w,alpha=0,lambda=bestlam_rw)
+coef(ridge.white.best)[,1]
+pred.ridge_w = predict(ridge.white.best, s = bestlam_rw, newx = x_w)
+mean((pred.ridge_w - winequality_white_new$quality)^2) # training_MSE
+
+######################################
+# 3) Lasso Regression
+
+# Red wine
+set.seed(10)
+cv.out_lr=cv.glmnet(x_r,y_r,alpha=1) # 10 fold cross validation by default
+bestlam_lr=cv.out_lr$lambda.min
+lasso.red.best=glmnet(x_r,y_r,alpha=1,lambda=bestlam_lr)
+lasso.coef_r=coef(lasso.red.best)[,1]
+lasso.coef_r[lasso.coef_r!=0]
+
+pred.lasso_r = predict(lasso.red.best, s = bestlam_lr, newx = x_r)
+mean((pred.lasso_r - winequality_red_new$quality)^2) # training_MSE
+
+
+# White wine
+set.seed(10)
+cv.out_lw=cv.glmnet(x_w,y_w,alpha=1) # 10 fold cross validation by default
+bestlam_lw=cv.out_lw$lambda.min
+lasso.white.best=glmnet(x_w,y_w,alpha=1,lambda=bestlam_lw)
+lasso.coef_w=coef(lasso.white.best)[,1]
+lasso.coef_w[lasso.coef_w!=0]
+
+pred.lasso_w = predict(lasso.white.best, s = bestlam_lw, newx = x_w)
+mean((pred.lasso_w - winequality_white_new$quality)^2) # training_MSE
+
+#################################################
+# 4) PCR
+
+# red wine
+pcr.fit=pcr(quality~., data=winequality_red, scale=TRUE, validation="CV") 
+summary(pcr.fit)  # M=10 has smallest CV error
+
+validationplot(pcr.fit,val.type="MSEP")  
+# we may only take few components say M=5, because the decrease of Cv after 5 is not significant
+
+pcr.fit=pcr(quality~., data=winequality_red, scale=TRUE, ncomp=5) #refit the model with M=9
+summary(pcr.fit)
+coef(pcr.fit)
+
+mean((pcr.fit$fitted.values-winequality_red$quality)^2)
+
+
+# white wine
+pcr.fit=pcr(quality~., data=winequality_white, scale=TRUE, validation="CV") 
+summary(pcr.fit)  # M=11 has smallest CV error
+
+validationplot(pcr.fit,val.type="MSEP")  
+# we may only take few components say M=5, because the decrease of Cv after 9 is not significant
+
+pcr.fit=pcr(quality~., data=winequality_white, scale=TRUE, ncomp=9) #refit the model with M=9
+summary(pcr.fit)
+coef(pcr.fit)
+
+mean((pcr.fit$fitted.values-winequality_white$quality)^2)
+
+######################################
+# 5) Local Regression
+
+# red wine
+idx_with_outliers_red <- c(); obs_with_outliers_red <- c()
+for(i in 2:11) {
+  idx_with_outliers_red<- c(idx_with_outliers_red,
+                            which.min(winequality_red_new[, i]),
+                            which.max(winequality_red_new[, i]))
+  min<-winequality_red_new[which.min(winequality_red_new[, i]),]
+  max<-winequality_red_new[which.max(winequality_red_new[, i]),]
+}
+idx_with_outliers_red<-unique(idx_with_outliers_red)
+obs_with_outliers_red<-winequality_red_new[idx_with_outliers_red,]
+winequality_red_no_outliers<-winequality_red_new[-idx_with_outliers_red,]
+
+red.cv.error <- c()
+models <- c()
+span <- c()
+
+winequality_red_no_outliers_rand <- winequality_red_no_outliers[sample(1:nrow(winequality_red_no_outliers)), ]
+
+for(i in 1:3)
+{
+  #cat("i=", i, "\t")
+  choices.for.models <- combn(2:11, i)
+  for(j in c(1:ncol(choices.for.models)))
+  {
+    #cat("j=", j, "\t")
+    temp <- data.frame(winequality_red_no_outliers_rand[, c(1,choices.for.models[,j])])
+    expr.temp <- as.formula(paste0(colnames(temp)[1], "~ ."))
+    
+    model<-"quality~"
+    for (m in 2:nrow(choices.for.models))
+    {
+      if (m==2)
+      {
+        model<-paste0(model,colnames(temp)[m])
+      } else
+      {
+        model<-paste0(model,"+",colnames(temp)[m])
+      }
+    }
+    
+    outlier.temp<-data.frame(obs_with_outliers_red[, c(1,choices.for.models[,j])])
+    X.outlier<-outlier.temp[, -1]
+    Y.outlier<-outlier.temp[, 1]
+    X <- temp[, -1]
+    Y <- temp[, 1]
+    
+    for(k in 1:10) 
+    {
+      #cat("k=", k, "\t")
+      CV_err <- c()
+      for(l in 1:10) 
+      {
+        val.idx <- seq(from = l, to = nrow(temp), by = 10)
+        
+        Y_val <- Y[val.idx]
+        if (nrow(choices.for.models)==1)
+        {
+          X_val <- X[val.idx]
+          X_tr <- c(X[-val.idx], X.outlier)
+        } else
+        {
+          X_val <- X[val.idx,]
+          X_tr <- rbind(X[-val.idx,], X.outlier)
+        }
+        
+        Y_tr <- c(Y[-val.idx], Y.outlier)
+        abc <- data.frame(quality = Y_tr, X_tr)
+        abc<- na.omit(abc)
+        Y_fit <- loess(expr.temp, span = 0.1*k, data = abc)
+        if (!is.na(Y_fit$one.delta))
+        {
+          Y_pred <- predict(Y_fit, newdata = X_val)
+          CV_err<- c(CV_err, mean((Y_val - Y_pred)^2))
+          CV_err<- CV_err[!is.na(CV_err)]
+        } else
+        {
+          CV_err<-c(NA)
+          
+        }
+      }
+      if (!is.na(CV_err))
+      {
+        models <- c(models, model)
+        span <- c(span, 0.1*k)
+        red.cv.error <- c(red.cv.error, mean(CV_err))
+        red.cv.error <- red.cv.error[!is.na(red.cv.error)]
+      }
+    }
+  }
+}
+summary <- data.frame(models, span, "cv.error"= red.cv.error)
+
+cat("Top 5 CV Error Models:", "\n")
+print(head(summary[order(summary$cv.error),],5))
+
+cat("\n", "Model", summary$models[which.min(summary$cv.error)], "with a span of",
+    summary$span[which.min(summary$cv.error)], 
+    "returns the lowest CV error of", min(summary$cv.error), "\n")
+
+# white wine
+idx_with_outliers_white <- c(); obs_with_outliers_white <- c()
+for(i in 2:9) {
+  idx_with_outliers_white<- c(idx_with_outliers_white,
+                              which.min(winequality_white_new[, i]),
+                              which.max(winequality_white_new[, i]))
+  min<-winequality_white_new[which.min(winequality_white_new[, i]),]
+  max<-winequality_white_new[which.max(winequality_white_new[, i]),]
+}
+idx_with_outliers_white<-unique(idx_with_outliers_white)
+obs_with_outliers_white<-winequality_white_new[idx_with_outliers_white,]
+winequality_white_no_outliers<-winequality_white_new[-idx_with_outliers_white,]
+
+white.cv.error <- c()
+models <- c()
+span <- c()
+
+winequality_white_no_outliers_rand <- winequality_white_no_outliers[sample(1:nrow(winequality_white_no_outliers)), ]
+
+for(i in 1:3)
+{
+  #cat("i=", i, "\t")
+  choices.for.models <- combn(2:9, i)
+  for(j in c(1:ncol(choices.for.models)))
+  {
+    #cat("j=", j, "\t")
+    temp <- data.frame(winequality_white_no_outliers_rand[, c(1,choices.for.models[,j])])
+    expr.temp <- as.formula(paste0(colnames(temp)[1], "~ ."))
+    
+    model<-"quality~"
+    for (m in 2:nrow(choices.for.models))
+    {
+      if (m==2)
+      {
+        model<-paste0(model,colnames(temp)[m])
+      } else
+      {
+        model<-paste0(model,"+",colnames(temp)[m])
+      }
+    }
+    
+    outlier.temp<-data.frame(obs_with_outliers_white[, c(1,choices.for.models[,j])])
+    X.outlier<-outlier.temp[, -1]
+    Y.outlier<-outlier.temp[, 1]
+    X <- temp[, -1]
+    Y <- temp[, 1]
+    
+    for(k in 1:10) 
+    {
+      #cat("k=", k, "\t")
+      CV_err <- c()
+      for(l in 1:10) 
+      {
+        val.idx <- seq(from = l, to = nrow(temp), by = 10)
+        
+        Y_val <- Y[val.idx]
+        if (nrow(choices.for.models)==1)
+        {
+          X_val <- X[val.idx]
+          X_tr <- c(X[-val.idx], X.outlier)
+        } else
+        {
+          X_val <- X[val.idx,]
+          X_tr <- rbind(X[-val.idx,], X.outlier)
+        }
+        
+        Y_tr <- c(Y[-val.idx], Y.outlier)
+        abc <- data.frame(quality = Y_tr, X_tr)
+        abc<- na.omit(abc)
+        Y_fit <- loess(expr.temp, span = 0.1*k, data = abc)
+        if (!is.na(Y_fit$one.delta))
+        {
+          Y_pred <- predict(Y_fit, newdata = X_val)
+          CV_err<- c(CV_err, mean((Y_val - Y_pred)^2))
+          CV_err<- CV_err[!is.na(CV_err)]
+        } else
+        {
+          CV_err<-c(NA)
+          
+        }
+      }
+      if (!is.na(CV_err))
+      {
+        models <- c(models, model)
+        span <- c(span, 0.1*k)
+        white.cv.error <- c(white.cv.error, mean(CV_err))
+        white.cv.error <- white.cv.error[!is.na(white.cv.error)]
+      }
+    }
+  }
+}
+summary <- data.frame(models, span, "cv.error"= white.cv.error)
+
+cat("Top 5 CV Error Models:", "\n")
+print(head(summary[order(summary$cv.error),],5))
+
+cat("\n", "Model", summary$models[which.min(summary$cv.error)], "with a span of",
+    summary$span[which.min(summary$cv.error)], 
+    "returns the lowest CV error of", min(summary$cv.error), "\n")
+
+##################################################
+# 6) GAM
+library(gam)
+
+# Outliers:
+# Remove outliers:
+idx_col_red <- c(2:11)
+outlier_indices_red <- matrix(rep(0, 40), nrow = 20, ncol = 2)
+for(i in 1:length(idx_col_red)) {
+  winequality_red_new_2 <- winequality_red_new[-which.min(winequality_red_new[, idx_col_red[i]]), ]
+  winequality_red_new_2 <- winequality_red_new[-which.max(winequality_red_new[, idx_col_red[i]]), ]
+  outlier_indices_red[2*i - 1, 1] <- which.min(winequality_red_new[, idx_col_red[i]])
+  outlier_indices_red[2*i - 1, 2] <- idx_col_red[i]
+  
+  outlier_indices_red[2*i, 1] <- which.max(winequality_red_new[, idx_col_red[i]])
+  outlier_indices_red[2*i, 2] <- idx_col_red[i]
+}
+
+idx_col_white <- c(2:9)
+outlier_indices_white <- matrix(rep(0, 32), nrow = 16, ncol = 2)
+for(j in 1:length(idx_col_white)) {
+  winequality_white_new_2 <- winequality_white_new[-which.min(winequality_white_new[, idx_col_white[j]]), ]
+  winequality_white_new_2 <- winequality_white_new[-which.max(winequality_white_new[, idx_col_white[j]]), ]
+  outlier_indices_white[2*j - 1, 1] <- which.min(winequality_white_new[, idx_col_white[j]])
+  outlier_indices_white[2*j - 1, 2] <- idx_col_white[j]
+  
+  outlier_indices_white[2*j, 1] <- which.max(winequality_white_new[, idx_col_white[j]])
+  outlier_indices_white[2*j, 2] <- idx_col_white[j]
+}
+
+outlier_rows_red <- winequality_red_new[unique(outlier_indices_red[,1]), ]
+outlier_rows_white <- winequality_white_new[unique(outlier_indices_white[,1]), ]
+
+winequality_red_rand_2 <- winequality_red_new_2[sample(1:nrow(winequality_red_new_2)), ]
+winequality_white_rand_2 <- winequality_white_new_2[sample(1:nrow(winequality_white_new_2)), ]
+      
+X.red <- winequality_red_rand_2[, -1]
+Y.red <- winequality_red_rand_2[, 1]
+      
+X.white <- winequality_white_rand_2[, -1]
+Y.white <- winequality_white_rand_2[, 1]
+
+predictors_red <- colnames(winequality_red_rand_2)[2:11]
+predictors_white <- colnames(winequality_white_rand_2)[2:9]
+
+model.formula.red <- c()
+model.formula.white <- c()
+df.red <- c()
+df.white <- c()
+
+cv.gam.fold.red <- rep(0, 10)
+cv.gam.fold.white <- rep(0, 10)
+
+CV.error.gam.red <- c()
+CV.error.gam.white <- c()
+
+# red wine
+for(j in 1:3) {
+  for(c in 1:(ncol(combn(length(predictors_red), j)))) {
+    for(k in 1:20) {
+      for(i in 1:10) {
+        indices <- combn(length(predictors_red), j)
+        form.red <- as.formula(paste0("quality ~ ", paste0("s(", predictors_red[indices[,c]], ", df = ", k, ")", collapse = "+")))
+        # validation set:
+        red.val.idx <- seq(from = i, to = nrow(winequality_red_rand_2), by = 10)
+        red.X.val <- X.red[red.val.idx,]
+        red.Y.val <- Y.red[red.val.idx]
+        # training set:
+        X.tr.red = rbind(X.red[-red.val.idx,], outlier_rows_red[, 2:11])
+        Y.tr.red = matrix(c(Y.red[-red.val.idx], outlier_rows_red[, 1]), ncol = 1)
+        # fit the model:
+        Y.fit.red <- gam(form.red, data = data.frame(X.tr.red, quality = Y.tr.red))
+        Y.pred.red <- predict(newdata = red.X.val, Y.fit.red)
+        cv.gam.fold.red[i] = mean((red.Y.val - Y.pred.red)^2)
+        
+      }
+      model.formula.red <- c(model.formula.red, Reduce(paste0, deparse(form.red)))
+      df.red <- c(df.red, k)
+      CV.error.gam.red <- c(CV.error.gam.red, mean(cv.gam.fold.red))
+    }
+  }
+}
+
+gam.table.red <- data.frame(model.formula.red, df.red, CV.error.gam.red)
+print(head(gam.table.red[order(gam.table.red$CV.error.gam.red),]),5)
+
+# white wine
+for(j in 1:3) {
+  for(c in 1:(ncol(combn(length(predictors_white), j)))) {
+    for(k in 1:20) {
+      for(i in 1:10) {
+        
+        indices <- combn(length(predictors_white), j)
+        form.white <- as.formula(paste0("quality ~ ", paste0("s(", predictors_white[indices[,c]], ", df = ", k, ")", collapse = "+")))
+        # validation set:
+        white.val.idx <- seq(from = i, to = nrow(winequality_white_rand_2), by = 10)
+        white.X.val <- X.white[white.val.idx,]
+        white.Y.val <- Y.white[white.val.idx]
+        # training set:
+        X.tr.white = rbind(X.white[-white.val.idx,], outlier_rows_white[, 2:9])
+        Y.tr.white = matrix(c(Y.white[-white.val.idx], outlier_rows_white[, 1]), ncol = 1)
+        # fit the model:
+        Y.fit.white <- gam(form.white, data = data.frame(X.tr.white, quality = Y.tr.white))
+        Y.pred.white <- predict(newdata = white.X.val, Y.fit.white)
+        cv.gam.fold.white[i] = mean((white.Y.val - Y.pred.white)^2)
+        
+      }
+      model.formula.white <- c(model.formula.white, Reduce(paste0, deparse(form.white)))
+      df.white <- c(df.white, k)
+      CV.error.gam.white <- c(CV.error.gam.white, mean(cv.gam.fold.white))
+    }
+  }
+}
+
+gam.table.white <- data.frame(model.formula.white, df.white, CV.error.gam.white)
+print(head(gam.table.white[order(gam.table.white$CV.error.gam.white),]),5)
+
+##################################################
+##################################################
+# Part 3: Model Cross Comparison
+
+library(gam); library(glmnet); library(pls)
+
+#red wine
+models <- c()
+red.cv.error <- c()
+
+    X.outlier<-obs_with_outliers_red[, -1]
+    Y.outlier<-obs_with_outliers_red[, 1]
+    
+      CV_err.ridge <- c(); CV_err.lasso <- c(); CV_err.mlr <- c()
+      CV_err.pcr <- c(); CV_err.local <- c(); CV_err.gam <- c()
+
+      for (seed in 1:100)
+      {
+        #cat("seed=", seed, "\t")
+        set.seed(seed)
+        winequality_red_no_outliers_rand <- winequality_red_no_outliers[sample(1:nrow(winequality_red_no_outliers)), ]
+        X <- winequality_red_no_outliers_rand[, -1]
+        Y <- winequality_red_no_outliers_rand[, 1]
+        for(l in 1:10) 
+        {
+          val.idx <- seq(from = l, to = nrow(winequality_red_no_outliers_rand), by = 10)
+          X_val <- X[val.idx,]
+          Y_val <- Y[val.idx]
+          X_tr <- rbind(X[-val.idx,], X.outlier)
+          Y_tr <- c(Y[-val.idx], Y.outlier)
+          
+          abc <- data.frame(quality = Y_tr, X_tr)
+          
+          best.ridge.red<-glmnet(X_tr, Y_tr, alpha = 0, lambda = 0.03844171)
+          best.lasso.red<-glmnet(X_tr, Y_tr, alpha = 1, lambda = 0.006412464)
+          best.mlr.red<-lm(quality ~ volatile.acidity + chlorides + free.sulfur.dioxide + total.sulfur.dioxide + pH + sulphates + alcohol, data=abc)
+          best.pcr.red<-pcr(quality~., ncomp=8, data=abc)
+          best.local.red<-loess(quality~volatile.acidity+sulphates, span=1.0, data=abc)
+          best.gam.red<- gam(quality ~ s(volatile.acidity, df = 19) + s(sulphates, df = 19) + s(alcohol, df = 19), data=abc)
+          
+          CV_err.ridge<- c(CV_err.ridge, mean((Y_val - predict(best.ridge.red, newx = as.matrix(X_val)))^2))
+          CV_err.lasso<- c(CV_err.lasso, mean((Y_val - predict(best.lasso.red, newx = as.matrix(X_val)))^2))
+          CV_err.mlr<- c(CV_err.mlr, mean((Y_val - predict(best.mlr.red, newdata = X_val))^2))
+          CV_err.pcr<- c(CV_err.pcr, mean((Y_val - predict(best.pcr.red, newdata = X_val))^2))
+          CV_err.local<- c(CV_err.local, mean((Y_val - predict(best.local.red, newdata = X_val))^2))
+          CV_err.gam<- c(CV_err.gam, mean((Y_val - predict(best.gam.red, newdata = X_val))^2))
+        }
+      }
+      
+      methods <- c("Ridge", "Lasso", "MLR", "PCR", "Local", "GAM")
+      red.cv.error <- c(mean(CV_err.ridge), mean(CV_err.lasso), mean(CV_err.mlr),
+                        mean(CV_err.pcr), mean(CV_err.local), mean(CV_err.gam))
+      summary <- data.frame(methods, "cv.error"= red.cv.error)
+
+print(summary)
+print(summary[order(summary$cv.error),])
+
+#white wine
+models <- c()
+white.cv.error <- c()
+
+X.outlier<-obs_with_outliers_white[, -1]
+Y.outlier<-obs_with_outliers_white[, 1]
+
+CV_err.ridge <- c(); CV_err.lasso <- c(); CV_err.mlr <- c()
+CV_err.pcr <- c(); CV_err.local <- c(); CV_err.gam <- c()
+
+for (seed in 1:100)
+{
+  #cat("seed=", seed, "\t")
+  set.seed(seed)
+  winequality_white_no_outliers_rand <- winequality_white_no_outliers[sample(1:nrow(winequality_white_no_outliers)), ]
+  X <- winequality_white_no_outliers_rand[, -1]
+  Y <- winequality_white_no_outliers_rand[, 1]
+  for(l in 1:10) 
+  {
+    val.idx <- seq(from = l, to = nrow(winequality_white_no_outliers_rand), by = 10)
+    X_val <- X[val.idx,]
+    Y_val <- Y[val.idx]
+    X_tr <- rbind(X[-val.idx,], X.outlier)
+    Y_tr <- c(Y[-val.idx], Y.outlier)
+    
+    abc <- data.frame(quality = Y_tr, X_tr)
+    
+    best.ridge.white<-glmnet(X_tr, Y_tr, alpha = 0, lambda = 0.03857224)
+    best.lasso.white<-glmnet(X_tr, Y_tr, alpha=1, lambda = 0.0006899222)
+    best.mlr.white<-lm(quality ~ fixed.acidity + volatile.acidity + total.sulfur.dioxide + density + sulphates + alcohol, data=abc)
+    best.pcr.white<-pcr(quality~., ncomp=8, data=abc)
+    best.local.white<-loess(quality~volatile.acidity+total.sulfur.dioxide, span=0.6, data=abc)
+    best.gam.white<-gam(quality ~ s(volatile.acidity, df = 16) + s(total.sulfur.dioxide, df = 16) + s(alcohol, df = 16), data=abc)
+    
+    CV_err.ridge<- c(CV_err.ridge, mean((Y_val - predict(best.ridge.white, newx = as.matrix(X_val)))^2))
+    CV_err.lasso<- c(CV_err.lasso, mean((Y_val - predict(best.lasso.white, newx = as.matrix(X_val)))^2))
+    CV_err.mlr<- c(CV_err.mlr, mean((Y_val - predict(best.mlr.white, newdata = X_val))^2))
+    CV_err.pcr<- c(CV_err.pcr, mean((Y_val - predict(best.pcr.white, newdata = X_val))^2))
+    CV_err.local<- c(CV_err.local, mean((Y_val - predict(best.local.white, newdata = X_val))^2))
+    CV_err.gam<- c(CV_err.gam, mean((Y_val - predict(best.gam.white, newdata = X_val))^2))
+    
+  }
+}
+
+methods <- c("Ridge", "Lasso", "MLR", "PCR", "Local", "GAM")
+white.cv.error <- c(mean(CV_err.ridge), mean(CV_err.lasso), mean(CV_err.mlr),
+                  mean(CV_err.pcr), mean(CV_err.local), mean(CV_err.gam))
+summary <- data.frame(methods, "cv.error"= white.cv.error)
+
+print(summary)
+print(summary[order(summary$cv.error),])
+```
+
