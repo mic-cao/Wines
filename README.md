@@ -1,4 +1,4 @@
-# Vinho Verde Wine Quality Prediction
+# Supervised Learning: Vinho Verde Wine Quality Prediction
 
 Authors: Michael Cao (yc849), Chang Chen (cc992), Aristotle Kolefas (aak99)  
 Course: STSCI 4740  
