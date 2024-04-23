@@ -51,3 +51,7 @@ Our analysis suggests that GAMs are the most effective models for predicting win
 - Annie. (2022, November 18). Vinho Verde Wine Guide: Portugal's prominent wine. Wineries Guide & Wine Tips. [Link](https://sonomawinegarden.com/vinho-verde-wine/)
 - Twohig, A. (2009, May 28). Wine-tasting 101: The Four Factors. Press Banner. [Link](https://pressbanner.com/wine-tasting-101-the-four-factors/)
 - Wine Quality Data Set. UCI Machine Learning Repository: Wine quality data set. [Link](https://archive.ics.uci.edu/ml/datasets/wine+quality)
+
+---
+
+For more details, please refer to our paper.
