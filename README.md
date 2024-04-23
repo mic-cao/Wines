@@ -54,4 +54,4 @@ Our analysis suggests that GAMs are the most effective models for predicting win
 
 ---
 
-For more details, please refer to our paper.
+For more details, refer to the [full report](https://github.com/mic-cao/Wines/blob/main/Written%20Report.pdf).
