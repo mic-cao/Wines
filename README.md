@@ -1,7 +1,7 @@
 # Supervised Learning: Vinho Verde Wine Quality Prediction
 
-Authors: Michael Cao (yc849), Chang Chen (cc992), Aristotle Kolefas (aak99)  
-Date: December 5, 2022
+**Authors:** Michael Cao (yc849), Chang Chen (cc992), Aristotle Kolefas (aak99)  
+**Date:** December 5, 2022
 
 ## Abstract
 
